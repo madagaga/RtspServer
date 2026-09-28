@@ -18,6 +18,8 @@
 namespace xop
 {
 
+std::shared_ptr<uint8_t> AllocRtpPacket(); /* net/MemoryManager.cpp */
+
 enum TransportMode
 {
 	RTP_OVER_TCP = 1,
@@ -76,7 +78,7 @@ struct MediaChannelInfo
 struct RtpPacket
 {
 	RtpPacket()
-		: data(new uint8_t[1600], std::default_delete<uint8_t[]>())
+		: data(AllocRtpPacket())
 	{
 		type = 0;
 		size = 0;
@@ -84,7 +86,7 @@ struct RtpPacket
 		last = 0;
 	}
 
-	std::shared_ptr<uint8_t> data;  /* Shared among all clients (zero-copy) */
+	std::shared_ptr<uint8_t> data;  /* Pooled, shared among all clients (zero-copy) */
 	uint32_t size;
 	uint32_t timestamp;
 	uint8_t  type;

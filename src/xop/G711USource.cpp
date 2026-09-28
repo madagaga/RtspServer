@@ -52,6 +52,9 @@ bool G711USource::HandleFrame(MediaChannelId channel_id, AVFrame frame)
 	uint32_t frame_size = frame.buffer.size();
 
 	RtpPacket rtp_pkt;
+	if (!rtp_pkt.data) {
+		return false; /* RTP packet pool exhausted */
+	}
 	rtp_pkt.type = frame.type;
 	rtp_pkt.timestamp = frame.timestamp;
 	rtp_pkt.size = frame_size + RTP_TCP_HEAD_SIZE + RTP_HEADER_SIZE;

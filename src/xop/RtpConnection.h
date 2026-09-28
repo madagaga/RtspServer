@@ -9,6 +9,7 @@
 #include <string>
 #include <memory>
 #include <random>
+#include <atomic>
 #include "rtp.h"
 #include "media.h"
 #include "net/Socket.h"
@@ -83,9 +84,13 @@ private:
     friend class RtspConnection;
     friend class MediaSession;
     void SetFrameType(uint8_t frameType = 0);
-    void SetRtpHeader(MediaChannelId channel_id, RtpPacket pkt);
-    int  SendRtpOverTcp(MediaChannelId channel_id, RtpPacket pkt);
-    int  SendRtpOverUdp(MediaChannelId channel_id, RtpPacket pkt);
+    /* Builds this connection's RTP header; never writes into the shared packet. */
+    void BuildRtpHeader(MediaChannelId channel_id, const RtpPacket& pkt, uint8_t *header);
+    int  SendRtpOverTcp(MediaChannelId channel_id, RtpPacket pkt, const uint8_t *header);
+    int  SendRtpOverUdp(MediaChannelId channel_id, RtpPacket pkt, const uint8_t *header);
+    /* Records that a packet was not sent; video channels then resync on a key
+       frame. Callable from any thread. */
+    void DropPacket(MediaChannelId channel_id, uint8_t frame_type);
 
 	std::weak_ptr<TcpConnection> rtsp_connection_;
     std::string rtsp_ip_;
@@ -96,6 +101,15 @@ private:
 
 	bool is_closed_ = false;
 	bool has_key_frame_ = false;
+
+    /* Set when a video packet of this channel was dropped (queue full): the
+       following packets are skipped until the start of the next key frame,
+       instead of feeding the decoder a stream with holes. Written from the
+       producer thread too, hence atomic. */
+    std::atomic_bool resync_[MAX_MEDIA_CHANNEL];
+    /* Event-loop thread only: true when the next packet starts a NAL
+       (the previous one carried the marker bit). */
+    bool nal_start_[MAX_MEDIA_CHANNEL];
 
     uint8_t  frame_type_ = 0;
     uint16_t local_rtp_port_[MAX_MEDIA_CHANNEL];

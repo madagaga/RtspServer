@@ -15,8 +15,9 @@ namespace xop
 void* Alloc(uint32_t size);
 void Free(void *ptr);
 
+/* Returns a 1600-byte RTP buffer. Pooled buffers go back to the pool
+   automatically when the last shared_ptr reference is released. */
 std::shared_ptr<uint8_t> AllocRtpPacket();
-void FreeRtpPacket(std::shared_ptr<uint8_t> buffer);
 
 class MemoryPool;
 class RtpPacketPool;
@@ -49,30 +50,27 @@ public:
 	std::mutex mutex_;
 };
 
-struct RtpPacketBuffer
-{
-	uint8_t data[1600];
-	RtpPacketBuffer() { }
-};
+static const uint32_t kRtpPacketBufferSize = 1600;
 
 class RtpPacketPool
 {
 public:
 	RtpPacketPool();
 	virtual ~RtpPacketPool();
-	
+
 	void Init(uint32_t capacity);
 	std::shared_ptr<uint8_t> AllocPacket();
-	void FreePacket(std::shared_ptr<uint8_t> buffer);
-	
-	uint32_t GetAvailable() const
-	{ return available_.size(); }
-	
+
+	uint32_t GetAvailable()
+	{ std::lock_guard<std::mutex> lock(mutex_); return (uint32_t)free_.size(); }
+
 private:
-	std::queue<std::shared_ptr<uint8_t>> available_;
+	void Release(uint8_t *buffer);
+
+	uint8_t *storage_ = nullptr;      /* capacity_ contiguous buffers */
+	std::vector<uint8_t*> free_;      /* free list (LIFO, cache-friendly) */
 	std::mutex mutex_;
 	uint32_t capacity_ = 0;
-	std::vector<std::shared_ptr<RtpPacketBuffer>> buffers_;
 };
 
 class MemoryManager
@@ -85,7 +83,6 @@ public:
 	void  Free(void* ptr);
 	
 	std::shared_ptr<uint8_t> AllocRtpPacket();
-	void FreeRtpPacket(std::shared_ptr<uint8_t> buffer);
 
 private:
 	MemoryManager();

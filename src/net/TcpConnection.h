@@ -34,6 +34,9 @@ public:
 
 	void Send(std::shared_ptr<char> data, uint32_t size);
 	void Send(const char *data, uint32_t size);
+	/* Returns false when the packet was not queued (closed or queue full). */
+	bool Send(const uint8_t *header, uint32_t header_size,
+	          std::shared_ptr<uint8_t> payload, uint32_t payload_offset, uint32_t payload_size);
     
 	void Disconnect();
 
@@ -66,6 +69,11 @@ protected:
 	std::atomic_bool is_closed_;
 
 private:
+	/* Bounded write queue: ~256 media packets (~400 KB, ~1.5 s at 2 Mbit/s)
+	   plus BufferWriter::kControlReserve slots for RTSP replies. A stalled
+	   peer can no longer grow the heap (was 50000 packets, ~80 MB). */
+	static const int kMaxWriteQueue = 256 + BufferWriter::kControlReserve;
+
 	void Close();
 
 	std::shared_ptr<xop::Channel> channel_;

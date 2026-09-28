@@ -76,7 +76,10 @@ bool TaskScheduler::AddTriggerEvent(TriggerEvent callback)
 	if (trigger_events_->Size() < kMaxTriggetEvents) {
 		std::lock_guard<std::mutex> lock(mutex_);
 		char event = kTriggetEvent;
-		trigger_events_->Push(std::move(callback));
+		/* The size check above is unlocked: Push() is the real test. */
+		if (!trigger_events_->Push(std::move(callback))) {
+			return false;
+		}
 		wakeup_pipe_->Write(&event, 1);
 		return true;
 	}

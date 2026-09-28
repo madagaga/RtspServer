@@ -4,6 +4,9 @@
 #include "RtpConnection.h"
 #include "RtspConnection.h"
 #include "net/SocketUtil.h"
+#if !defined(WIN32) && !defined(_WIN32)
+#include <sys/uio.h>
+#endif
 
 using namespace std;
 using namespace xop;
@@ -22,6 +25,8 @@ RtpConnection::RtpConnection(std::weak_ptr<TcpConnection> rtsp_connection)
 		media_channel_info_[chn].rtp_header.seq = 0; //htons(1);
 		media_channel_info_[chn].rtp_header.ts = htonl(rd());
 		media_channel_info_[chn].rtp_header.ssrc = htonl(rd());
+		resync_[chn] = false;
+		nal_start_[chn] = true;
 	}
 
 	auto conn = rtsp_connection_.lock();
@@ -224,14 +229,20 @@ void RtpConnection::SetFrameType(uint8_t frame_type)
 	}
 }
 
-void RtpConnection::SetRtpHeader(MediaChannelId channel_id, RtpPacket pkt)
+/* header = RTP_TCP_HEAD_SIZE interleaved bytes + RTP_HEADER_SIZE RTP header.
+   The packet buffer is shared by every client (and may still sit in another
+   client's TCP queue), so the per-client header lives outside of it. */
+void RtpConnection::BuildRtpHeader(MediaChannelId channel_id, const RtpPacket& pkt, uint8_t *header)
 {
-	if((media_channel_info_[channel_id].is_play || media_channel_info_[channel_id].is_record) && has_key_frame_) {
-		media_channel_info_[channel_id].rtp_header.marker = pkt.last;
-		media_channel_info_[channel_id].rtp_header.ts = htonl(pkt.timestamp);
-		media_channel_info_[channel_id].rtp_header.seq = htons(media_channel_info_[channel_id].packet_seq++);
-		memcpy(pkt.data.get()+4, &media_channel_info_[channel_id].rtp_header, RTP_HEADER_SIZE);
-	}
+	media_channel_info_[channel_id].rtp_header.marker = pkt.last;
+	media_channel_info_[channel_id].rtp_header.ts = htonl(pkt.timestamp);
+	media_channel_info_[channel_id].rtp_header.seq = htons(media_channel_info_[channel_id].packet_seq++);
+
+	header[0] = '$';
+	header[1] = (uint8_t)media_channel_info_[channel_id].rtp_channel;
+	header[2] = (uint8_t)(((pkt.size-4)&0xFF00)>>8);
+	header[3] = (uint8_t)((pkt.size-4)&0xFF);
+	memcpy(header+RTP_TCP_HEAD_SIZE, &media_channel_info_[channel_id].rtp_header, RTP_HEADER_SIZE);
 }
 
 int RtpConnection::SendRtpPacket(MediaChannelId channel_id, RtpPacket pkt)
@@ -249,44 +260,89 @@ int RtpConnection::SendRtpPacket(MediaChannelId channel_id, RtpPacket pkt)
 
 	bool ret = rtsp_conn->task_scheduler_->AddTriggerEvent([this, channel_id, pkt] {
 		this->SetFrameType(pkt.type);
-		this->SetRtpHeader(channel_id, pkt);
-		if((media_channel_info_[channel_id].is_play || media_channel_info_[channel_id].is_record) && has_key_frame_ ) {            
+
+		bool at_nal_start = nal_start_[channel_id];
+		nal_start_[channel_id] = (pkt.last != 0);
+		if (resync_[channel_id]) {
+			/* Same key-frame test as SetFrameType(), but only at a NAL boundary */
+			if (!at_nal_start || !(pkt.type == 0 || pkt.type == VIDEO_FRAME_I)) {
+				return;
+			}
+			resync_[channel_id] = false;
+		}
+
+		if((media_channel_info_[channel_id].is_play || media_channel_info_[channel_id].is_record) && has_key_frame_ ) {
+			uint8_t header[RTP_TCP_HEAD_SIZE + RTP_HEADER_SIZE];
+			this->BuildRtpHeader(channel_id, pkt, header);
 			if(transport_mode_ == RTP_OVER_TCP) {
-				SendRtpOverTcp(channel_id, pkt);
+				if (SendRtpOverTcp(channel_id, pkt, header) < 0) {
+					this->DropPacket(channel_id, pkt.type);
+				}
 			}
 			else {
-				SendRtpOverUdp(channel_id, pkt);
+				SendRtpOverUdp(channel_id, pkt, header);
 			}
-                   
+
 			//media_channel_info_[channel_id].octetCount  += pkt.size;
 			//media_channel_info_[channel_id].packetCount += 1;
 		}
 	});
 
+	if (!ret) {
+		/* Event queue full: the loop thread never sees this packet */
+		DropPacket(channel_id, pkt.type);
+	}
+
 	return ret ? 0 : -1;
 }
 
-int RtpConnection::SendRtpOverTcp(MediaChannelId channel_id, RtpPacket pkt)
+void RtpConnection::DropPacket(MediaChannelId channel_id, uint8_t frame_type)
+{
+	/* A lost audio packet is a short glitch; a lost video packet corrupts
+	   every frame up to the next key frame, so wait for it. */
+	if (frame_type != AUDIO_FRAME) {
+		resync_[channel_id] = true;
+	}
+}
+
+int RtpConnection::SendRtpOverTcp(MediaChannelId channel_id, RtpPacket pkt, const uint8_t *header)
 {
 	auto conn = rtsp_connection_.lock();
 	if (!conn) {
 		return -1;
 	}
 
-	uint8_t* rtpPktPtr = pkt.data.get();
-	rtpPktPtr[0] = '$';
-	rtpPktPtr[1] = (char)media_channel_info_[channel_id].rtp_channel;
-	rtpPktPtr[2] = (char)(((pkt.size-4)&0xFF00)>>8);
-	rtpPktPtr[3] = (char)((pkt.size -4)&0xFF);
-
-	conn->Send((char*)rtpPktPtr, pkt.size);
+	const uint32_t header_size = RTP_TCP_HEAD_SIZE + RTP_HEADER_SIZE;
+	if (!conn->Send(header, header_size, pkt.data, header_size, pkt.size - header_size)) {
+		return -1;
+	}
 	return pkt.size;
 }
 
-int RtpConnection::SendRtpOverUdp(MediaChannelId channel_id, RtpPacket pkt)
+int RtpConnection::SendRtpOverUdp(MediaChannelId channel_id, RtpPacket pkt, const uint8_t *header)
 {
-	int ret = sendto(rtpfd_[channel_id], (const char*)pkt.data.get()+4, pkt.size-4, 0,
+	const uint32_t payload_offset = RTP_TCP_HEAD_SIZE + RTP_HEADER_SIZE;
+#if !defined(WIN32) && !defined(_WIN32) /* not Windows */
+	struct iovec iov[2];
+	iov[0].iov_base = (void*)(header + RTP_TCP_HEAD_SIZE);
+	iov[0].iov_len  = RTP_HEADER_SIZE;
+	iov[1].iov_base = pkt.data.get() + payload_offset;
+	iov[1].iov_len  = pkt.size - payload_offset;
+
+	struct msghdr msg;
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_name    = &(peer_rtp_addr_[channel_id]);
+	msg.msg_namelen = sizeof(struct sockaddr_in);
+	msg.msg_iov     = iov;
+	msg.msg_iovlen  = 2;
+	int ret = sendmsg(rtpfd_[channel_id], &msg, 0);
+#else /* Windows: assemble in a local buffer */
+	char buf[1600];
+	memcpy(buf, header + RTP_TCP_HEAD_SIZE, RTP_HEADER_SIZE);
+	memcpy(buf + RTP_HEADER_SIZE, pkt.data.get() + payload_offset, pkt.size - payload_offset);
+	int ret = sendto(rtpfd_[channel_id], buf, pkt.size - RTP_TCP_HEAD_SIZE, 0,
 					(struct sockaddr *)&(peer_rtp_addr_[channel_id]), sizeof(struct sockaddr_in));
+#endif
                    
 	if(ret < 0) {        
 		Teardown();

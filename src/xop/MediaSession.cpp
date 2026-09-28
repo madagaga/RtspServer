@@ -72,7 +72,7 @@ bool MediaSession::AddSource(MediaChannelId channel_id, MediaSource* source)
 		}
         
 		/* Zero-copy: share the same RtpPacket buffer among all clients.
-		   Each client only writes its own RTP header and sends. */
+		   Each client builds its own RTP header outside the buffer and sends. */
 		int count = 0;
 		for(auto iter : clients) {
 			int ret = 0;
@@ -119,10 +119,6 @@ bool MediaSession::StartMulticast()
 
 std::string MediaSession::GetSdpMessage(std::string ip, std::string session_name)
 {
-	if (sdp_ != "") {
-		return sdp_;
-	}
-    
 	if (media_sources_.empty()) {
 		return "";
 	}
@@ -174,8 +170,7 @@ std::string MediaSession::GetSdpMessage(std::string ip, std::string session_name
 		}
 	}
 
-	sdp_ = buf;
-	return sdp_;
+	return buf;
 }
 
 MediaSource* MediaSession::GetMediaSource(MediaChannelId channel_id)
@@ -192,7 +187,17 @@ bool MediaSession::HandleFrame(MediaChannelId channel_id, AVFrame frame)
 	std::lock_guard<std::mutex> lock(mutex_);
 
 	if(media_sources_[channel_id]) {
-		media_sources_[channel_id]->HandleFrame(channel_id, frame);
+		if (!media_sources_[channel_id]->HandleFrame(channel_id, frame)) {
+			/* Frame not (fully) packetized, e.g. RTP packet pool exhausted:
+			   every client missed it, so every client must resync. */
+			std::lock_guard<std::mutex> map_lock(map_mutex_);
+			for (auto& client : clients_) {
+				auto conn = client.second.lock();
+				if (conn) {
+					conn->DropPacket(channel_id, frame.type);
+				}
+			}
+		}
 	}
 	else {
 		return false;
@@ -240,4 +245,3 @@ void MediaSession::RemoveClient(SOCKET rtspfd)
 		clients_.erase(iter);
 	}
 }
-

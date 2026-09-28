@@ -47,7 +47,11 @@ struct AVFrame
 
 static const int MAX_MEDIA_CHANNEL = 2;
 static const int MAX_CLIENTS = 3;  /* Embedded systems: max 3 concurrent clients */
-static const int RTP_PACKET_POOL_SIZE = 100;  /* RTP packet pool capacity */
+/* RTP packet pool capacity (x 1600 B = 600 KB, allocated once). Must exceed
+   one client's write queue (256 packets, TcpConnection::kMaxWriteQueue) plus
+   an IDR frame (~70-140 packets at 1080p), since packets are shared. When it
+   runs dry, frames are dropped rather than taken from the heap. */
+static const int RTP_PACKET_POOL_SIZE = 384;
 
 enum MediaChannelId
 {

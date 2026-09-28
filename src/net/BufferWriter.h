@@ -28,6 +28,10 @@ public:
 
 	bool Append(std::shared_ptr<char> data, uint32_t size, uint32_t index=0);
 	bool Append(const char* data, uint32_t size, uint32_t index=0);
+	/* Queue a private header (copied, <= kMaxHeaderSize) followed by a shared
+	   payload (referenced, never copied nor written). */
+	bool Append(const uint8_t* header, uint32_t header_size,
+	            std::shared_ptr<uint8_t> payload, uint32_t payload_offset, uint32_t payload_size);
 	int Send(SOCKET sockfd, int timeout=0);
 
 	bool IsEmpty() const 
@@ -36,15 +40,24 @@ public:
 	bool IsFull() const 
 	{ return ((int)buffer_.size() >= max_queue_length_ ? true : false); }
 
-	uint32_t Size() const 
+	uint32_t Size() const
 	{ return (uint32_t)buffer_.size(); }
-	
+
+	/* Slots kept free for RTSP control replies: media packets are refused
+	   first, so a backlogged client still gets its keep-alive answers. */
+	static const int kControlReserve = 32;
+
 private:
-	typedef struct 
+	static const uint32_t kMaxHeaderSize = 16;
+
+	typedef struct
 	{
-		std::shared_ptr<char> data;
-		uint32_t size;
-		uint32_t writeIndex;
+		uint8_t  header[kMaxHeaderSize];  /* per-connection bytes sent first */
+		uint32_t header_size;
+		std::shared_ptr<char> data;       /* sent after the header */
+		uint32_t data_offset;
+		uint32_t size;                    /* header_size + data length */
+		uint32_t writeIndex;              /* bytes already sent, over header+data */
 	} Packet;
 
 	std::queue<Packet> buffer_;  		

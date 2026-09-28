@@ -18,11 +18,6 @@ std::shared_ptr<uint8_t> xop::AllocRtpPacket()
 	return MemoryManager::Instance().AllocRtpPacket();
 }
 
-void xop::FreeRtpPacket(std::shared_ptr<uint8_t> buffer)
-{
-	return MemoryManager::Instance().FreeRtpPacket(buffer);
-}
-
 MemoryPool::MemoryPool()
 {
 
@@ -90,11 +85,8 @@ RtpPacketPool::RtpPacketPool()
 
 RtpPacketPool::~RtpPacketPool()
 {
-	std::lock_guard<std::mutex> lock(mutex_);
-	buffers_.clear();
-	while (!available_.empty()) {
-		available_.pop();
-	}
+	/* storage_ is intentionally not freed: packets still referenced by a
+	   connection at exit would otherwise point to released memory. */
 }
 
 void RtpPacketPool::Init(uint32_t capacity)
@@ -104,42 +96,51 @@ void RtpPacketPool::Init(uint32_t capacity)
 		return; // Already initialized
 	}
 
-	capacity_ = capacity;
-	buffers_.reserve(capacity);
+	storage_ = (uint8_t*)malloc(capacity * kRtpPacketBufferSize);
+	if (storage_ == nullptr) {
+		return; // Every AllocPacket() falls back to the heap
+	}
 
+	capacity_ = capacity;
+	free_.reserve(capacity);
 	for (uint32_t i = 0; i < capacity; i++) {
-		auto buf = std::make_shared<RtpPacketBuffer>();
-		buffers_.push_back(buf);
-		available_.push(std::shared_ptr<uint8_t>(buf, buf->data));
+		free_.push_back(storage_ + i * kRtpPacketBufferSize);
 	}
 }
 
 std::shared_ptr<uint8_t> RtpPacketPool::AllocPacket()
 {
-	std::lock_guard<std::mutex> lock(mutex_);
-	if (!available_.empty()) {
-		auto buffer = available_.front();
-		available_.pop();
-		return buffer;
+	uint8_t *buffer = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (!free_.empty()) {
+			buffer = free_.back();
+			free_.pop_back();
+		}
 	}
 
-	// Fallback: allocate from heap if pool exhausted
-	return std::shared_ptr<uint8_t>(new uint8_t[1600]);
+	if (buffer != nullptr) {
+		/* The deleter hands the buffer back to the pool once the last
+		   reference (source, session or any client queue) is dropped. */
+		return std::shared_ptr<uint8_t>(buffer, [this](uint8_t *p) { Release(p); });
+	}
+
+	/* Pool exhausted: no heap fallback, so the RTP footprint stays bounded
+	   whatever the clients do. The caller drops the frame (and resyncs). */
+	return nullptr;
 }
 
-void RtpPacketPool::FreePacket(std::shared_ptr<uint8_t> buffer)
+void RtpPacketPool::Release(uint8_t *buffer)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	if (available_.size() < capacity_) {
-		available_.push(buffer);
-	}
+	free_.push_back(buffer);
 }
 
 MemoryManager::MemoryManager()
 {
-	memory_pools_[0].Init(4096, 50);
-	memory_pools_[1].Init(40960, 10);
-	memory_pools_[2].Init(102400, 5);
+	/* The generic memory_pools_ are not initialized: nothing calls
+	   xop::Alloc(), and Init() touched ~1.1 MB up front. Alloc() then
+	   falls back to malloc() if it is ever used. */
 	rtp_packet_pool_.Init(RTP_PACKET_POOL_SIZE);
 }
 
@@ -150,8 +151,10 @@ MemoryManager::~MemoryManager()
 
 MemoryManager& MemoryManager::Instance()
 {
-	static MemoryManager s_mgr;
-	return s_mgr;
+	/* Never destroyed: pooled RTP buffers may be released after static
+	   destructors have run (connections torn down at exit). */
+	static MemoryManager *s_mgr = new MemoryManager();
+	return *s_mgr;
 }
 
 void* MemoryManager::Alloc(uint32_t size)
@@ -191,9 +194,4 @@ void MemoryManager::Free(void* ptr)
 std::shared_ptr<uint8_t> MemoryManager::AllocRtpPacket()
 {
 	return rtp_packet_pool_.AllocPacket();
-}
-
-void MemoryManager::FreeRtpPacket(std::shared_ptr<uint8_t> buffer)
-{
-	rtp_packet_pool_.FreePacket(buffer);
 }

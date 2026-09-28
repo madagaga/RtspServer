@@ -61,6 +61,9 @@ bool VP8Source::HandleFrame(MediaChannelId channel_id, AVFrame frame)
         uint32_t payload_size = MAX_RTP_PAYLOAD_SIZE;
 
         RtpPacket rtp_pkt;
+        if (!rtp_pkt.data) {
+            return false; /* RTP packet pool exhausted */
+        }
         rtp_pkt.type = frame.type;
         rtp_pkt.timestamp = frame.timestamp;
         rtp_pkt.size = RTP_TCP_HEAD_SIZE + RTP_HEADER_SIZE + RTP_VPX_HEAD_SIZE + MAX_RTP_PAYLOAD_SIZE;

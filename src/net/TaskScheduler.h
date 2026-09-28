@@ -48,7 +48,11 @@ protected:
 
 	static const char kTriggetEvent = 1;
 	static const char kTimerEvent = 2;
-	static const int  kMaxTriggetEvents = 50000;
+	/* The ring is preallocated (one std::function per slot): 50000 slots cost
+	   ~1 MB up front. One event per RTP packet per client: 2048 covers an IDR
+	   burst for every client; beyond that packets are dropped and the video
+	   channel resyncs on the next key frame (RtpConnection::DropPacket). */
+	static const int  kMaxTriggetEvents = 2048;
 };
 
 }

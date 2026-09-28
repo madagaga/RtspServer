@@ -6,7 +6,7 @@ using namespace xop;
 TcpConnection::TcpConnection(TaskScheduler *task_scheduler, SOCKET sockfd)
 	: task_scheduler_(task_scheduler)
 	, read_buffer_(new BufferReader)
-	, write_buffer_(new BufferWriter(50000))
+	, write_buffer_(new BufferWriter(kMaxWriteQueue))
 	, channel_(new Channel(sockfd))
 {
 	is_closed_ = false;
@@ -54,6 +54,23 @@ void TcpConnection::Send(const char *data, uint32_t size)
 
 		this->HandleWrite();
 	}
+}
+
+bool TcpConnection::Send(const uint8_t *header, uint32_t header_size,
+                         std::shared_ptr<uint8_t> payload, uint32_t payload_offset, uint32_t payload_size)
+{
+	if (is_closed_) {
+		return false;
+	}
+
+	/* A full queue means the peer is not keeping up: the packet is dropped
+	   (silently, this happens per packet) and the caller resynchronizes. */
+	mutex_.lock();
+	bool queued = write_buffer_->Append(header, header_size, payload, payload_offset, payload_size);
+	mutex_.unlock();
+
+	this->HandleWrite();
+	return queued;
 }
 
 void TcpConnection::Disconnect()

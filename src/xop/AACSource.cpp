@@ -105,6 +105,9 @@ bool AACSource::HandleFrame(MediaChannelId channel_id, AVFrame frame)
 	AU[3] = (frame_size & 0x1f) << 3;
 
 	RtpPacket rtp_pkt;
+	if (!rtp_pkt.data) {
+		return false; /* RTP packet pool exhausted */
+	}
 	rtp_pkt.type = frame.type;
 	rtp_pkt.timestamp = frame.timestamp;
 	rtp_pkt.size = frame_size + RTP_TCP_HEAD_SIZE + RTP_HEADER_SIZE + AU_SIZE;

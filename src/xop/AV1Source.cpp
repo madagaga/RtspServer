@@ -113,6 +113,9 @@ bool AV1Source::HandleFrame(MediaChannelId channelId, AVFrame frame)
 	if (frame_size + 1 <= MAX_RTP_PAYLOAD_SIZE) {
 		// Frame fits in a single packet
 		RtpPacket rtp_pkt;
+		if (!rtp_pkt.data) {
+			return false; /* RTP packet pool exhausted */
+		}
 		rtp_pkt.type = frame.type;
 		rtp_pkt.timestamp = frame.timestamp;
 		rtp_pkt.size = frame_size + 1 + RTP_TCP_HEAD_SIZE + RTP_HEADER_SIZE;
@@ -146,6 +149,9 @@ bool AV1Source::HandleFrame(MediaChannelId channelId, AVFrame frame)
 			}
 
 			RtpPacket rtp_pkt;
+			if (!rtp_pkt.data) {
+				return false; /* RTP packet pool exhausted */
+			}
 			rtp_pkt.type = frame.type;
 			rtp_pkt.timestamp = frame.timestamp;
 			rtp_pkt.size = RTP_TCP_HEAD_SIZE + RTP_HEADER_SIZE + 1 + chunk_size;
